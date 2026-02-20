@@ -1,1 +1,47 @@
+name: Normalizer
 
+on:
+  repository_dispatch:
+    types: [simple_cron_trigger]
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies (silent)
+        run: |
+          python -m pip install --upgrade pip > /dev/null 2>&1
+          pip install aiohttp cachetools fastapi python-dotenv pymongo bson > /dev/null 2>&1
+
+      - name: Run Script (fully silent)
+        env:
+          Z9_A1: ${{ secrets.Z9_A1 }}
+          Z9_B2: ${{ secrets.Z9_B2 }}
+          Z9_C3: ${{ secrets.Z9_C3 }}
+          Z9_D4: ${{ secrets.Z9_D4 }}
+          Z9_E5: ${{ secrets.Z9_E5 }}
+          Z9_F6: ${{ secrets.Z9_F6 }}
+          Z9_G7: ${{ secrets.Z9_G7 }}
+          Z9_H8: ${{ secrets.Z9_H8 }}
+          Z9_I9: ${{ secrets.Z9_I9 }}
+          Z9_J0: ${{ secrets.Z9_J0 }}
+          URI: ${{ secrets.URI }}
+          NAME: ${{ secrets.NAME }}
+          PORT: 4000
+          CACHE_TTL_SECONDS: 20
+          HTTP_TIMEOUT_MS: 8000
+          GLOBAL_JOB_TIMEOUT_MS: 45000
+          DEBUG_API: "false"
+
+        run: |
+          python cfr.py > /dev/null 2>&1 || exit 1
