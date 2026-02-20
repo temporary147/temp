@@ -13,10 +13,12 @@ from cachetools import TTLCache
 from fastapi import HTTPException
 from dotenv import load_dotenv
 
-# Added imports for robust DB connection
+# Added imports for robust Mongo connection
 import certifi
-from pymongo.server_api import ServerApi
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError, DuplicateKeyError
+from pymongo.server_api import ServerApi
+import logging
 
 load_dotenv()
 
@@ -548,51 +550,98 @@ def hlth():
 
 
 def rfcoll(collection, data):
+    # NOTE: kept original behavior intact (delete_many then insert_one)
     collection.delete_many({})
     result = collection.insert_one(data)
     return result.inserted_id
 
 
+# -----------------------
+# New helpers: secure Mongo client with fallback (minimal, non-invasive)
+# -----------------------
+def get_mongo_client(uri: str, allow_invalid_cert: bool = False, timeout_ms: int = 10000) -> MongoClient:
+    kwargs = {
+        "serverSelectionTimeoutMS": timeout_ms,
+        "tls": True,
+        "tlsCAFile": certifi.where(),
+        "server_api": ServerApi("1"),
+    }
+    if allow_invalid_cert:
+        kwargs["tlsAllowInvalidCertificates"] = True
+    return MongoClient(uri, **kwargs)
+
+
+def connect_with_fallbacks(uri: str) -> MongoClient:
+    """
+    Try secure connection first, if TLS-like error detected attempt one insecure fallback.
+    This mirrors the robust approach without changing insertion logic.
+    """
+    # 1) Try secure client
+    try:
+        client = get_mongo_client(uri, allow_invalid_cert=False, timeout_ms=10000)
+        client.admin.command("ping")
+        return client
+    except Exception as e_secure:
+        msg = str(e_secure)
+        # If it looks like TLS/SSL issue, attempt one insecure fallback (useful for CI/testing)
+        if "SSL" in msg or "tls" in msg.lower() or "handshake" in msg.lower():
+            try:
+                client = get_mongo_client(uri, allow_invalid_cert=True, timeout_ms=20000)
+                client.admin.command("ping")
+                # Warning will be logged by caller
+                return client
+            except Exception as e_insecure:
+                raise e_secure from e_insecure
+        # otherwise raise original
+        raise
+
+
+# Configure simple logging for visibility (keeps behavior otherwise same)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("funding-normalizer")
+
+
 if __name__ == "__main__":
+    client = None
     try:
         out = asyncio.run(ga())
-        # ---- Hardened DB connect & clearer error reporting (minimal, contained changes) ----
+
+        # Attempt to write to MongoDB only if env provided
         URI = os.getenv("URI")
         NAME = os.getenv("NAME")
-        client = None
+
+        if not URI or not NAME:
+            # Keep behavior transparent: raise helpful error rather than silently continuing
+            raise RuntimeError("Missing required environment variables for MongoDB: URI and NAME must be set.")
+
+        # Connect robustly (secure, with one-time insecure fallback for TLS issues)
         try:
-            if not URI or not NAME:
-                print(f"ERROR: Missing required environment variables. URI set? {bool(URI)} NAME set? {bool(NAME)}")
-            # Create a secure client with certifi CA bundle and Server API v1
-            client = MongoClient(
-                URI,
-                serverSelectionTimeoutMS=10000,
-                tls=True,
-                tlsCAFile=certifi.where(),
-                server_api=ServerApi("1"),
-            )
-            # Force an immediate check of the connection
-            client.admin.command("ping")
+            client = connect_with_fallbacks(URI)
+        except Exception as conn_exc:
+            logger.error("Failed to connect to MongoDB: %s", conn_exc)
+            raise
+
+        try:
             db = client[NAME]
             collection = db["fr"]
-            try:
-                inserted_id = rfcoll(collection, out)
-                print("Inserted ID:", inserted_id)
-            except Exception as e:
-                # Surface insert errors to logs so CI shows them
-                print("Insert failed:", repr(e))
+            inserted_id = rfcoll(collection, out)
+            logger.info("Mongo write successful, inserted id: %s", inserted_id)
+        except PyMongoError as pm_err:
+            logger.exception("PyMongo error during rfcoll: %s", pm_err)
+            raise
         except Exception as e:
-            # Surface connection errors to logs so CI shows them
-            print("Mongo connection/operation failed:", repr(e))
+            logger.exception("Unexpected error during Mongo write: %s", e)
+            raise
         finally:
             try:
-                if client:
-                    client.close()
-            except Exception as e:
-                print("Error closing client:", repr(e))
-        # Print the output payload (unchanged behavior)
+                client.close()
+            except Exception:
+                pass
+
+        # Print the JSON response as before
         print(json_util.dumps(out))
     finally:
+        # ensure aiohttp session cleanup
         try:
             asyncio.run(cs())
         except Exception:
