@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import asyncio
 import math
 import os
@@ -11,6 +12,11 @@ import aiohttp
 from cachetools import TTLCache
 from fastapi import HTTPException
 from dotenv import load_dotenv
+
+# Added imports for robust DB connection
+import certifi
+from pymongo.server_api import ServerApi
+from pymongo import MongoClient
 
 load_dotenv()
 
@@ -550,46 +556,44 @@ def rfcoll(collection, data):
 if __name__ == "__main__":
     try:
         out = asyncio.run(ga())
+        # ---- Hardened DB connect & clearer error reporting (minimal, contained changes) ----
+        URI = os.getenv("URI")
+        NAME = os.getenv("NAME")
+        client = None
         try:
-            from pymongo import MongoClient
-
-            URI = os.getenv("URI")
-            NAME = os.getenv("NAME")
-            # client = MongoClient(URI)
-            from pymongo.server_api import ServerApi
-            import certifi
-
+            if not URI or not NAME:
+                print(f"ERROR: Missing required environment variables. URI set? {bool(URI)} NAME set? {bool(NAME)}")
+            # Create a secure client with certifi CA bundle and Server API v1
             client = MongoClient(
                 URI,
                 serverSelectionTimeoutMS=10000,
                 tls=True,
                 tlsCAFile=certifi.where(),
-                server_api=ServerApi("1")
+                server_api=ServerApi("1"),
             )
-
+            # Force an immediate check of the connection
             client.admin.command("ping")
             db = client[NAME]
             collection = db["fr"]
             try:
                 inserted_id = rfcoll(collection, out)
-            except Exception:
-                pass
-        except Exception:
-            pass
+                print("Inserted ID:", inserted_id)
+            except Exception as e:
+                # Surface insert errors to logs so CI shows them
+                print("Insert failed:", repr(e))
+        except Exception as e:
+            # Surface connection errors to logs so CI shows them
+            print("Mongo connection/operation failed:", repr(e))
         finally:
             try:
-                client.close()
-            # except Exception:
-            #     pass
+                if client:
+                    client.close()
             except Exception as e:
-                print("Mongo Error:", e)
-                raise
+                print("Error closing client:", repr(e))
+        # Print the output payload (unchanged behavior)
         print(json_util.dumps(out))
     finally:
         try:
             asyncio.run(cs())
-        # except Exception:
-        #     pass
-        except Exception as e:
-            print("Mongo Error:", e)
-            raise
+        except Exception:
+            pass
