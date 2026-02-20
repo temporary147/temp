@@ -1,8 +1,7 @@
 name: Normalizer
 
 on:
-  repository_dispatch:
-    types: [simple_cron_trigger]
+  workflow_dispatch: {}
 
 jobs:
   run-script:
