@@ -49,6 +49,8 @@ jobs:
           Z9_H8: ${{ secrets.Z9_H8 }}
           Z9_I9: ${{ secrets.Z9_I9 }}
           Z9_J0: ${{ secrets.Z9_J0 }}
+          Z9_K1: ${{ secrets.Z9_K1 }}
+          Z9_K2: ${{ secrets.Z9_K2 }}
           URI: ${{ secrets.URI }}
           NAME: ${{ secrets.NAME }}
           PORT: 4000
