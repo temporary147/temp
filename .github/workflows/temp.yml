@@ -15,7 +15,6 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PIP_NO_CACHE_DIR: "0"
 
     steps:
       - name: Checkout
@@ -58,5 +57,4 @@ jobs:
           GLOBAL_JOB_TIMEOUT_MS: 45000
           DEBUG_API: "false"
 
-        run: |
-          python cfr.py
+        run: python cfr.py
