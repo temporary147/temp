@@ -29,15 +29,10 @@ jobs:
 
       - name: Install Dependencies (Silent)
         run: |
-          python -m pip install --upgrade pip -q > /dev/null 2>&1
-          pip install -q \
-            aiohttp \
-            cachetools \
-            python-dotenv \
-            libsql-client \
-            certifi > /dev/null 2>&1
+          python -m pip install --upgrade pip -q
+          pip install -r requirements.txt -q
 
-      - name: Run Script (Fully Silent)
+      - name: Run Script (Silent)
         env:
           Z9_A1: ${{ secrets.Z9_A1 }}
           Z9_B2: ${{ secrets.Z9_B2 }}
