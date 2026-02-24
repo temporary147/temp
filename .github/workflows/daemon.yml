@@ -36,6 +36,7 @@ jobs:
             python-dotenv \
 
       - name: Run Script
+        timeout-minutes: 2
         env:
           Z9_A1: ${{ secrets.Z9_A1 }}
           Z9_B2: ${{ secrets.Z9_B2 }}
@@ -56,4 +57,13 @@ jobs:
           GLOBAL_JOB_TIMEOUT_MS: 45000
           DEBUG_API: "false"
 
-        run: python cfr.py
+        run: |
+          # timeout command as extra safety net — kills process after 90s regardless
+          timeout 90 python cfr.py
+          EXIT_CODE=$?
+          # exit code 124 means timeout command killed it — treat as failure
+          if [ $EXIT_CODE -eq 124 ]; then
+            echo "::error::Script timed out after 90s (killed by timeout command)"
+            exit 1
+          fi
+          exit $EXIT_CODE
