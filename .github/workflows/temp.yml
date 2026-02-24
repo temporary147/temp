@@ -4,36 +4,40 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  run-script:
+  run-worker:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     concurrency:
-      group: normalizer-job
+      group: funding-worker
       cancel-in-progress: true
 
-    env:
-      PYTHONUNBUFFERED: "1"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PIP_ROOT_USER_ACTION: "ignore"
-
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      - name: Install Dependencies (Silent)
+      - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip -q
-          pip install -r requirements.txt -q
+          python -m pip install --upgrade pip
+          pip install aiohttp libsql-client cachetools python-dotenv
 
-      - name: Run Script (Silent)
+      - name: Run Worker
         env:
+          PORT: 4000
+          CACHE_TTL_SECONDS: 20
+          HTTP_TIMEOUT_MS: 8000
+          DEBUG_API: false
+          GLOBAL_JOB_TIMEOUT_MS: 45000
+          PYTHONUNBUFFERED: 1
+
+          DBT_URL: ${{ secrets.DBT_URL }}
+          DBT_KEY: ${{ secrets.DBT_KEY }}
+
           Z9_A1: ${{ secrets.Z9_A1 }}
           Z9_B2: ${{ secrets.Z9_B2 }}
           Z9_C3: ${{ secrets.Z9_C3 }}
@@ -46,12 +50,5 @@ jobs:
           Z9_J0: ${{ secrets.Z9_J0 }}
           Z9_K1: ${{ secrets.Z9_K1 }}
           Z9_K2: ${{ secrets.Z9_K2 }}
-          DBT_URL: ${{ secrets.DBT_URL }}
-          DBT_KEY: ${{ secrets.DBT_KEY }}
-          PORT: 4000
-          CACHE_TTL_SECONDS: 20
-          HTTP_TIMEOUT_MS: 8000
-          GLOBAL_JOB_TIMEOUT_MS: 45000
-          DEBUG_API: "false"
-        run: |
-          python cfr.py > /dev/null 2>&1
+
+        run: python cfr.py
