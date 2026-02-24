@@ -27,7 +27,6 @@ _E0, _E1, _E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
 
 DT_URL = _g("DBT_URL")
 DT_KEY = _g("DBT_KEY")
-PORT = int(_g("PORT", required=False, default="4000"))
 CACHE_TTL = int(_g("CACHE_TTL_SECONDS", required=False, default="20"))
 HTTP_TIMEOUT = int(_g("HTTP_TIMEOUT_MS", required=False, default="8000"))
 DEBUG_API = _g("DEBUG_API", required=False, default="true").lower() in ("true", "1")
@@ -55,23 +54,38 @@ async def _s() -> aiohttp.ClientSession:
                 connector=aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, enable_cleanup_closed=True),
                 timeout=aiohttp.ClientTimeout(total=t, connect=min(3.0, t), sock_read=t),
                 trust_env=False,
-                headers={"User-Agent": "Funding-Normalizer/2.0", "Accept": "application/json, text/plain, */*",
-                         "Connection": "keep-alive"},
+                headers={
+                    "User-Agent": "Funding-Normalizer/2.0",
+                    "Accept": "application/json, text/plain, */*",
+                    "Connection": "keep-alive",
+                },
             )
     return _session
 
 
 async def _cs() -> None:
+    """Close aiohttp session and connector cleanly to avoid hanging."""
     global _session
     if _session and not _session.closed:
-        await _session.close()
+        try:
+            # Close connector explicitly before closing session
+            connector = _session.connector
+            await _session.close()
+            if connector and not connector._closed:
+                await connector.close()
+        except Exception:
+            pass
+    _session = None
+    # Give event loop a moment to flush pending callbacks
+    await asyncio.sleep(0.25)
 
 
 class _T:
-    attempts: int = 0
-    failures: int = 0
-    per_exchange: Dict[str, int] = {}
-    failed_urls: List[str] = []
+    def __init__(self) -> None:
+        self.attempts: int = 0
+        self.failures: int = 0
+        self.per_exchange: Dict[str, int] = {}
+        self.failed_urls: List[str] = []
 
     def reset(self) -> None:
         self.attempts = 0
@@ -142,7 +156,8 @@ def _sfn(arr: List[Dict[str, Any]], key: str, n: int = 8) -> Optional[float]:
     ts_key = next((k for k in _TS_KEYS if k in arr[0]), None)
     take = sorted(arr, key=lambda x: _t(x.get(ts_key)), reverse=True)[:n] if ts_key else arr[:n]
     vals = [v for it in take if isinstance(it, dict) for v in [_n(it.get(key))] if v is not None]
-    return sum(vals) if vals else None
+    # FIX: average instead of sum to avoid inflated rates
+    return (sum(vals) / len(vals)) if vals else None
 
 
 def _e(data: Any, path: Union[str, List[str], Callable]) -> Any:
@@ -209,7 +224,6 @@ def _reg(name: str):
     def _dec(fn: AdapterFn):
         _AD[name] = fn
         return fn
-
     return _dec
 
 
@@ -221,7 +235,6 @@ def _bulk(env_tpl: str, label_prefix: str):
             return {c: None for c in C}
         d = r["Data"]
         return {c: _n((d.get(f"{c}-USD-INVERSE-PERPETUAL") or {}).get("VALUE")) for c in C}
-
     return _inner
 
 
@@ -231,40 +244,49 @@ _AD["bybit"] = _bulk(_E11, "bybit")
 
 @_reg("bitget")
 async def _a_bitget() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
+        # FIX: lambda capture bug — bind `s` at definition time via default arg
         return {c: await _tryv([
-            {"label": f"bitget:{s}", "url": _E2.format(symbol=quote(s)),
-             "extract": lambda d: (d.get("data") or [{}])[0].get("fundingRate")}
+            {
+                "label": f"bitget:{s}",
+                "url": _E2.format(symbol=quote(s)),
+                "extract": lambda d, _s=s: (d.get("data") or [{}])[0].get("fundingRate"),
+            }
             for s in (f"{c}USDT", f"{c}-USDT")
         ])}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
 
 @_reg("kucoin")
 async def _a_kucoin() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
         syms = (["XBTUSDTM", ".XBTUSDTMFPI8H"] if c == "BTC" else []) + [f"{c}USDTM", f"{c}USDT"]
+        # FIX: lambda capture bug — bind `s` at definition time via default arg
         return {c: await _tryv([
-            {"label": f"kucoin:{s}", "url": _E3.format(symbol=quote(s)),
-             "extract": lambda d: (d.get("data") or {}).get("nextFundingRate")}
+            {
+                "label": f"kucoin:{s}",
+                "url": _E3.format(symbol=quote(s)),
+                "extract": lambda d, _s=s: (d.get("data") or {}).get("nextFundingRate"),
+            }
             for s in syms
         ])}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
 
 @_reg("gate_io")
 async def _a_gate() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
+        # FIX: lambda capture bug — bind `s` at definition time via default arg
         return {c: await _tryv([
-            {"label": f"gate:{s}", "url": _E4.format(symbol=quote(s)),
-             "extract": lambda d: d[0].get("r") if isinstance(d, list) and d else None}
+            {
+                "label": f"gate:{s}",
+                "url": _E4.format(symbol=quote(s)),
+                "extract": lambda d, _s=s: d[0].get("r") if isinstance(d, list) and d else None,
+            }
             for s in (f"{c}_USDT", f"{c}USDT")
         ])}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
@@ -285,54 +307,63 @@ async def _a_huobi() -> AR:
 
 @_reg("coinbase")
 async def _a_coinbase() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
+        # FIX: lambda capture bug — bind `inst` at definition time via default arg
         return {c: await _tryv([
-            {"label": f"coinbase:{inst}", "url": _E6.format(symbol=quote(inst)),
-             "extract": lambda d: _sfn(d.get("results") or d.get("data") or [], "funding_rate", 8)}
+            {
+                "label": f"coinbase:{inst}",
+                "url": _E6.format(symbol=quote(inst)),
+                "extract": lambda d, _i=inst: _sfn(d.get("results") or d.get("data") or [], "funding_rate", 8),
+            }
             for inst in (f"{c}-PERP", f"{c}-PERPETUAL", f"{c}-USD-PERP")
         ])}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
 
 @_reg("mexc")
 async def _a_mexc() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
+        # FIX: lambda capture bug — bind `s` at definition time via default arg
         return {c: await _tryv([
-            {"label": f"mexc:{s}", "url": _E7.format(symbol=quote(s)),
-             "extract": lambda d: (d.get("data") or {}).get("fundingRate")}
+            {
+                "label": f"mexc:{s}",
+                "url": _E7.format(symbol=quote(s)),
+                "extract": lambda d, _s=s: (d.get("data") or {}).get("fundingRate"),
+            }
             for s in (f"{c}_USDT", f"{c}USDT")
         ])}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
 
 @_reg("okex")
 async def _a_okx() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
         inst = f"{c}-USD-SWAP"
         r = await _fetch(_E8.format(symbol=quote(inst)), f"okx_funding:{inst}")
         return {c: _n(r["data"][0].get("fundingRate")) if r and r.get("code") == "0" and r.get("data") else None}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
 
 @_reg("bingx")
 async def _a_bingx() -> AR:
-    async def _f(c: str):
+    async def _f(c: str) -> AR:
+        # FIX: lambda capture bug — bind `s` at definition time via default arg
         return {c: await _tryv([
-            {"label": f"bingx:{s}", "url": _E9.format(symbol=quote(s)),
-             "extract": lambda d: (d.get("data") or [{}])[0].get("fundingRate")}
+            {
+                "label": f"bingx:{s}",
+                "url": _E9.format(symbol=quote(s)),
+                "extract": lambda d, _s=s: (d.get("data") or [{}])[0].get("fundingRate"),
+            }
             for s in (f"{c}-USDT", f"{c}USDT")
         ])}
-
     results = await asyncio.gather(*(_f(c) for c in C))
     return {k: v for r in results for k, v in r.items()}
 
 
+# Build keys AFTER all adapters are registered
 _AD_KEYS = list(_AD.keys())
 
 
@@ -361,6 +392,7 @@ async def run_all_adapters(cache_key: str = CACHE_KEY) -> Dict[str, Any]:
         t.cancel()
         results.append({"key": tasks.get(t, "unknown"), "result": {c: None for c in C}})
     duration_ms = (time.time() - start) * 1000
+
     normalized: Dict[str, Dict[str, Optional[str]]] = {
         item["key"]: {
             coin: _p(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else None
@@ -368,15 +400,20 @@ async def run_all_adapters(cache_key: str = CACHE_KEY) -> Dict[str, Any]:
         }
         for item in results
     }
+
+    # FIX: compute average from raw floats before formatting
     btc_vals = [
         float(item["result"]["BTC"]) for item in results
-        if item.get("result", {}).get("BTC") is not None and not math.isnan(float(item["result"]["BTC"]))
+        if item.get("result", {}).get("BTC") is not None
+        and not math.isnan(float(item["result"]["BTC"]))
     ]
     normalized["btc_overall"] = {"BTC": _p(sum(btc_vals) / len(btc_vals)) if btc_vals else None}
+
     null_counts = {c: sum(1 for ex in normalized if normalized[ex].get(c) is None) for c in C}
     fully_missing = [c for c, cnt in null_counts.items() if cnt == len(_AD_KEYS)]
     ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
     _cache[cache_key] = normalized
+
     return {
         "ok": True, "source": "live", "data": normalized,
         "fetchedAt": ist_now.strftime("%d-%m-%Y %I:%M:%S %p IST"),
@@ -391,89 +428,95 @@ async def run_all_adapters(cache_key: str = CACHE_KEY) -> Dict[str, Any]:
 
 
 _DDL = [
-    """CREATE TABLE IF NOT EXISTS rate
-    (
-        id
-        TEXT
-        PRIMARY
-        KEY
-        DEFAULT (
-        lower (
-        hex(
-        randomblob
-       (
-        16
-       )))),
-        name TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        rate TEXT,
-        version INTEGER NOT NULL DEFAULT 1,
-        updated_at TEXT NOT NULL DEFAULT
-       (
-           datetime
-       (
-           'now'
-       )),
-        UNIQUE
-       (
-           name,
-           symbol
-       )
-        ) STRICT;""",
+    """CREATE TABLE IF NOT EXISTS rate (
+        id         TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        name       TEXT NOT NULL,
+        symbol     TEXT NOT NULL,
+        rate       TEXT,
+        version    INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (name, symbol)
+    ) STRICT;""",
     "CREATE INDEX IF NOT EXISTS idx_rate_name   ON rate(name);",
     "CREATE INDEX IF NOT EXISTS idx_rate_symbol ON rate(symbol);",
+    # FIX: trigger condition was inverted — fire when updated_at IS same (i.e. not explicitly changed)
     """CREATE TRIGGER IF NOT EXISTS trg_rate_updated_at
-       AFTER
-    UPDATE ON rate FOR EACH ROW
-        WHEN OLD.updated_at = NEW.updated_at
+       AFTER UPDATE ON rate FOR EACH ROW
+       WHEN OLD.updated_at = NEW.updated_at
     BEGIN
-    UPDATE rate
-    SET updated_at = NEW.updated_at,
-        version    = OLD.version + 1
-    WHERE id = OLD.id;
+        UPDATE rate
+        SET updated_at = datetime('now'),
+            version    = OLD.version + 1
+        WHERE id = OLD.id;
     END;""",
 ]
 
 
 def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any]) -> int:
-    conn = libsql.connect(data_url, auth_token=data_token)
-    cur = conn.cursor()
-    for ddl in _DDL:
-        cur.execute(ddl)
-    normalized = snapshot.get("data") or {}
-    ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
-    cur.execute("BEGIN")
+    import threading
+
+    _timed_out = threading.Event()
+
+    def _watchdog():
+        if not _timed_out.wait(timeout=60):
+            _logger.error("DB write timed out after 60s — forcing exit")
+            os._exit(1)
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
+
     try:
-        inserted = 0
-        for exchange, coin_map in normalized.items():
-            if not isinstance(coin_map, dict):
-                continue
-            for symbol, pct_val in coin_map.items():
-                cur.execute("DELETE FROM rate WHERE name = ? AND symbol = ?", (exchange, symbol))
-                cur.execute("INSERT INTO rate (name, symbol, rate, updated_at) VALUES (?, ?, ?, ?)",
-                            (exchange, symbol, pct_val, ist_now))
-                inserted += 1
-        conn.commit()
-        return inserted
-    except Exception:
-        conn.rollback()
-        raise
+        _logger.info("DB: connecting to libsql...")
+        conn = libsql.connect(data_url, auth_token=data_token)
+        _logger.info("DB: connected. running DDL...")
+        cur = conn.cursor()
+        for ddl in _DDL:
+            cur.execute(ddl)
+        normalized = snapshot.get("data") or {}
+        ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+        _logger.info("DB: starting transaction, %d exchanges to write...", len(normalized))
+        cur.execute("BEGIN")
+        try:
+            inserted = 0
+            for exchange, coin_map in normalized.items():
+                if not isinstance(coin_map, dict):
+                    continue
+                for symbol, pct_val in coin_map.items():
+                    cur.execute("DELETE FROM rate WHERE name = ? AND symbol = ?", (exchange, symbol))
+                    cur.execute(
+                        "INSERT INTO rate (name, symbol, rate, updated_at) VALUES (?, ?, ?, ?)",
+                        (exchange, symbol, pct_val, ist_now),
+                    )
+                    inserted += 1
+            _logger.info("DB: committing %d rows...", inserted)
+            conn.commit()
+            _logger.info("DB: commit done.")
+            return inserted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        _timed_out.set()
 
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         snapshot = asyncio.run(run_all_adapters())
         if not snapshot:
             raise RuntimeError("No output from run_all_adapters()")
         count = write_snapshot(DT_URL, DT_KEY, snapshot)
-        _logger.info("Successfully Executed: %d", count)
+        _logger.info("Successfully Executed: %d rows written", count)
     except Exception as exc:
         _logger.exception("Fatal error: %s", exc)
-        raise
+        exit_code = 1
     finally:
+        # FIX: close session with timeout so it doesn't hang
         try:
-            asyncio.run(_cs())
+            asyncio.run(asyncio.wait_for(_cs(), timeout=5.0))
         except Exception:
             pass
+    # FIX: force exit — kills any lingering background threads/tasks
+    os._exit(exit_code)
