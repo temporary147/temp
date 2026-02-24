@@ -24,7 +24,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install aiohttp libsql-client cachetools python-dotenv
+          pip install aiohttp libsql cachetools python-dotenv
 
       - name: Run Worker
         env:
