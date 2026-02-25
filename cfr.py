@@ -1,133 +1,133 @@
 #!/usr/bin/env python3
-import asyncio
-import math
-import os
-import time
-import random
-from bson import json_util
+from __future__ import annotations
+import asyncio, logging, math, os, random, time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import quote, urlparse
-import aiohttp
+from zoneinfo import ZoneInfo
+import aiohttp, libsql
 from cachetools import TTLCache
-from fastapi import HTTPException
 from dotenv import load_dotenv
-import certifi
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError, DuplicateKeyError
-from pymongo.server_api import ServerApi
-import logging
 
 load_dotenv()
+_logger = logging.getLogger("fnorm")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-def a1(key: str) -> str:
-    v = os.getenv(key)
-    if not v:
-        raise RuntimeError(f"Missing required env key: {key}")
+def _g(k: str, required: bool = True, default: str | None = None) -> str:
+    v = os.getenv(k, default)
+    if required and not v:
+        raise RuntimeError(f"Missing required env var: {k}")
     return v
 
 
-E0 = a1("Z9_A1")
-E1 = a1("Z9_B2")
-E2 = a1("Z9_C3")
-E3 = a1("Z9_D4")
-E4 = a1("Z9_E5")
-E5 = a1("Z9_F6")
-E6 = a1("Z9_G7")
-E7 = a1("Z9_H8")
-E8 = a1("Z9_I9")
-E9 = a1("Z9_J0")
-E10 = a1("Z9_K1")
-E11 = a1("Z9_K2")
-p0 = int(os.getenv("PORT", "4000"))
-c_ttl = int(os.getenv("CACHE_TTL_SECONDS", "20"))
-h_tm = int(os.getenv("HTTP_TIMEOUT_MS", "8000"))
-dbg_flag = os.getenv("DEBUG_API", "true").lower() in ("true", "1")
-GJT = int(os.getenv("GLOBAL_JOB_TIMEOUT_MS", "45000"))
-COINS = [
-    "BTC",
-    "ETH",
-    "SOL",
-    "XRP",
-    "HYPE",
-    "DOGE",
-    "BNB",
-    "BCH",
-    "SUI",
-    "ADA",
-    "LINK",
-    "ZEC",
-    "AVAX",
-    "PAXG",
-    "LTC",
-    "UNI",
-    "TRX",
-    "ARB",
-    "APT",
-    "OP",
-    "TON",
-    "DOT",
+# API templates / endpoints (these must exist in env)
+_E0, _E1, _E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
+    "Z9_A1", "Z9_B2", "Z9_C3", "Z9_D4", "Z9_E5", "Z9_F6", "Z9_G7", "Z9_H8", "Z9_I9", "Z9_J0", "Z9_K1", "Z9_K2"
+))
+
+# Turso / libsql connection info
+DT_URL = os.getenv("DBT_URL") or os.getenv("DT_URL") or os.getenv("LIBSQL_URL") or _g("DBT_URL", required=False, default=None)
+DT_KEY = os.getenv("DBT_KEY") or os.getenv("DT_KEY") or os.getenv("LIBSQL_KEY") or _g("DBT_KEY", required=False, default=None)
+
+CACHE_TTL = int(_g("CACHE_TTL_SECONDS", required=False, default="20"))
+HTTP_TIMEOUT = int(_g("HTTP_TIMEOUT_MS", required=False, default="15000"))
+DEBUG_API = _g("DEBUG_API", required=False, default="true").lower() in ("true", "1")
+JOB_TIMEOUT = int(_g("GLOBAL_JOB_TIMEOUT_MS", required=False, default="200000"))
+CACHE_KEY = "funding:normalized:allcoins_v2"
+
+# chunk size for executemany rows to Turso
+LIBSQL_CHUNK_SIZE = int(os.getenv("LIBSQL_CHUNK_SIZE", "500"))
+# Optionally run DDL on start (default False). Prefer running ensure_schema.py once in CI instead.
+ENSURE_SCHEMA_ON_START = os.getenv("ENSURE_SCHEMA_ON_START", "false").lower() in ("true", "1")
+
+
+C: List[str] = [
+    "BTC", "ETH", "XRP", "BNB", "SOL", "TRX", "DOGE", "BCH", "ADA", "HYPE", "XMR", "LINK", "XLM", "HBAR", "ZEC", "LTC",
+    "AVAX", "SUI", "TON", "UNI", "DOT", "PAXG", "XAUT", "ARB", "APT"
 ]
+
 AR = Dict[str, Optional[float]]
-AF = Callable[[], "asyncio.Future[AR]"]
-sess_obj: Optional[aiohttp.ClientSession] = None
-sess_lock = asyncio.Lock()
+AdapterFn = Callable[[], "asyncio.Future[AR]"]
+
+_session: Optional[aiohttp.ClientSession] = None
+_sess_lock = asyncio.Lock()
 
 
-def null_func(*a, **k):
-    return None
+async def _s() -> aiohttp.ClientSession:
+    global _session
+    async with _sess_lock:
+        if not _session or _session.closed:
+            t = max(1.0, HTTP_TIMEOUT / 1000)
+            _session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, enable_cleanup_closed=True),
+                timeout=aiohttp.ClientTimeout(total=t, connect=min(3.0, t), sock_read=t),
+                trust_env=False,
+                headers={"User-Agent": "Funding-Normalizer/2.0", "Accept": "application/json, text/plain, */*",
+                         "Connection": "keep-alive"},
+            )
+    return _session
 
 
-dX = null_func
-iX = null_func
-wX = null_func
-eX = null_func
-cache_obj = TTLCache(maxsize=128, ttl=c_ttl)
-tot_attempts = 0
-tot_failures = 0
-per_ex_count: Dict[str, int] = {}
-failed_urls: List[str] = []
+async def _cs() -> None:
+    global _session
+    if _session and not _session.closed:
+        await _session.close()
 
 
-def inc_ex_count(x: str):
-    per_ex_count[x] = per_ex_count.get(x, 0) + 1
+class _T:
+    attempts: int = 0
+    failures: int = 0
+    per_exchange: Dict[str, int] = {}
+    failed_urls: List[str] = []
+
+    def reset(self) -> None:
+        self.attempts = 0
+        self.failures = 0
+        self.per_exchange.clear()
+        self.failed_urls.clear()
+
+    def record_attempt(self, e: str) -> None:
+        self.attempts += 1
+        self.per_exchange[e] = self.per_exchange.get(e, 0) + 1
+
+    def record_failure(self, label: str, url: str) -> None:
+        self.failures += 1
+        self.failed_urls.append(f"{label} -> {url}")
 
 
-def to_num(v: Any) -> Optional[float]:
+_tel = _T()
+_cache: TTLCache = TTLCache(maxsize=128, ttl=CACHE_TTL)
+
+
+def _n(v: Any) -> Optional[float]:
     if v is None:
         return None
     try:
         n = float(v)
-        if math.isnan(n):
-            return None
-        return n
+        return None if math.isnan(n) else n
     except (ValueError, TypeError):
         return None
 
 
-def dec_to_pct(d: Union[float, str, None], digits: int = 4) -> Optional[str]:
+def _p(d: Union[float, str, None], digits: int = 4) -> Optional[str]:
     if d is None:
         return None
     try:
-        num = float(d)
-        if math.isnan(num):
-            return None
-        return f"{(num * 100):.{digits}f}%"
+        n = float(d)
+        return None if math.isnan(n) else f"{(n * 100):.{digits}f}%"
     except Exception:
         return None
 
 
-def parse_ts_to_sec(t: Any) -> float:
+def _t(t: Any) -> float:
     if t is None:
         return 0.0
     try:
         if isinstance(t, (int, float)):
             return float(t)
         if isinstance(t, str):
-            s = t.strip()
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
+            s = t.strip().rstrip("Z") + ("+00:00" if t.strip().endswith("Z") else "")
             try:
                 return datetime.fromisoformat(s).timestamp()
             except Exception:
@@ -137,33 +137,23 @@ def parse_ts_to_sec(t: Any) -> float:
                 except Exception:
                     return 0.0
     except Exception:
-        return 0.0
+        pass
     return 0.0
 
 
-def sfn(arr: List[Dict[str, Any]], key: str, n: int = 8) -> Optional[float]:
-    if not isinstance(arr, list) or len(arr) == 0:
+_TS_KEYS = ("event_time", "fundingTime", "funding_time", "t", "timestamp")
+
+
+def _sfn(arr: List[Dict[str, Any]], key: str, n: int = 8) -> Optional[float]:
+    if not isinstance(arr, list) or not arr:
         return None
-    sample = arr[0] if arr else {}
-    time_key = next((k for k in ["event_time", "fundingTime", "funding_time", "t", "timestamp"] if k in sample), None)
-    take = arr
-    if time_key:
-        take = sorted(arr, key=lambda it: parse_ts_to_sec(it.get(time_key)), reverse=True)[:n]
-    else:
-        take = arr[:n]
-    s = 0.0
-    found = False
-    for it in take:
-        v = it.get(key) if isinstance(it, dict) else None
-        num = to_num(v)
-        if num is None:
-            continue
-        s += num
-        found = True
-    return s if found else None
+    ts_key = next((k for k in _TS_KEYS if k in arr[0]), None)
+    take = sorted(arr, key=lambda x: _t(x.get(ts_key)), reverse=True)[:n] if ts_key else arr[:n]
+    vals = [v for it in take if isinstance(it, dict) for v in [_n(it.get(key))] if v is not None]
+    return sum(vals) if vals else None
 
 
-def epp(data: Any, path: Union[str, List[str], Callable]) -> Any:
+def _e(data: Any, path: Union[str, List[str], Callable]) -> Any:
     if data is None:
         return None
     if callable(path):
@@ -171,9 +161,8 @@ def epp(data: Any, path: Union[str, List[str], Callable]) -> Any:
             return path(data)
         except Exception:
             return None
-    parts = path.split(".") if isinstance(path, str) else list(path)
     cur = data
-    for p in parts:
+    for p in (path.split(".") if isinstance(path, str) else list(path)):
         if cur is None:
             return None
         if isinstance(cur, dict):
@@ -181,11 +170,9 @@ def epp(data: Any, path: Union[str, List[str], Callable]) -> Any:
             continue
         if isinstance(cur, list):
             try:
-                idx = int(p)
-                if 0 <= idx < len(cur):
-                    cur = cur[idx]
-                    continue
-                return None
+                i = int(p)
+                cur = cur[i] if 0 <= i < len(cur) else None
+                continue
             except Exception:
                 return None
         try:
@@ -195,485 +182,342 @@ def epp(data: Any, path: Union[str, List[str], Callable]) -> Any:
     return cur
 
 
-async def get_session() -> aiohttp.ClientSession:
-    global sess_obj
-    async with sess_lock:
-        if sess_obj is None or sess_obj.closed:
-            total_read = max(1.0, h_tm / 1000.0)
-            connect_timeout = min(3.0, total_read)
-            timeout = aiohttp.ClientTimeout(total=total_read, connect=connect_timeout, sock_read=total_read)
-            connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300, enable_cleanup_closed=True)
-            headers = {"User-Agent": "Funding-Normalizer/2.0", "Accept": "application/json, text/plain, */*",
-                       "Connection": "keep-alive"}
-            sess_obj = aiohttp.ClientSession(connector=connector, headers=headers, timeout=timeout, trust_env=False)
-    return sess_obj
-
-
-async def close_session() -> None:
-    global sess_obj
-    if sess_obj and not sess_obj.closed:
-        await sess_obj.close()
-
-
-async def fetch_url(url: str, label: Optional[str] = None) -> Optional[Any]:
-    global tot_attempts, tot_failures
-    tot_attempts += 1
-    exchange = (label.split(":")[0] if label else (
-        urlparse(url).hostname.split(".")[0] if urlparse(url).hostname else "unknown"))
-    inc_ex_count(exchange)
-    attempts = 3
-    backoff_base = 0.1
-    for attempt in range(1, attempts + 1):
-        session = await get_session()
+async def _fetch(url: str, label: Optional[str] = None) -> Optional[Any]:
+    exchange = (label or "").split(":")[0] or (urlparse(url).hostname or "unknown").split(".")[0]
+    _tel.record_attempt(exchange)
+    for attempt in range(1, 4):
         try:
-            async with session.get(url) as resp:
+            async with (await _s()).get(url) as resp:
                 if resp.status != 200:
-                    text = await resp.text()
-                    raise Exception(f"HTTP {resp.status} :: {text[:200]}")
+                    raise aiohttp.ClientResponseError(resp.request_info, resp.history, status=resp.status)
                 return await resp.json()
         except Exception:
-            if attempt >= attempts:
-                tot_failures += 1
-                failed_urls.append(f"{label if label else 'unknown'} -> {url}")
+            if attempt >= 3:
+                _tel.record_failure(label or "unknown", url)
                 return None
-            jitter = random.uniform(0, 0.12)
-            await asyncio.sleep(backoff_base * attempt + jitter)
-            continue
+            await asyncio.sleep(0.1 * attempt + random.uniform(0, 0.12))
 
 
-async def try_variants(variants: List[Dict[str, Any]]) -> Optional[float]:
+async def _tryv(variants: List[Dict[str, Any]]) -> Optional[float]:
     for v in variants:
-        data = await fetch_url(v["url"], v.get("label"))
+        data = await _fetch(v["url"], v.get("label"))
         if not data:
             continue
-        if callable(v.get("extract")):
-            try:
-                extracted = v["extract"](data)
-            except Exception:
-                extracted = None
-        else:
-            extracted = epp(data, v.get("extract", ""))
-        num = to_num(extracted)
+        extracted = v["extract"](data) if callable(v.get("extract")) else _e(data, v.get("extract", ""))
+        num = _n(extracted)
         if num is not None:
             return num
     return None
 
 
-def symbol_combinations(coin: str) -> List[str]:
-    C = coin.upper()
-    return [
-        f"{C}USDT",
-        f"{C}-USDT",
-        f"{C}_USDT",
-        f"{C}USDTM",
-        f"{C}USDT_PERP",
-        f"{C}-PERP",
-        f"{C}-PERPETUAL",
-        f"{C}PERP",
-        f"{C}/USDT",
-        f"{C}USD",
-    ]
+_AD: Dict[str, AdapterFn] = {}
 
 
-ADAPTERS: Dict[str, AF] = {}
+def _reg(name: str):
+    def _dec(fn: AdapterFn):
+        _AD[name] = fn
+        return fn
+
+    return _dec
 
 
-async def bce() -> AR:
+def _bulk(env_tpl: str, label_prefix: str):
+    async def _inner() -> AR:
+        instruments = ",".join(f"{c}-USD-INVERSE-PERPETUAL" for c in C)
+        r = await _fetch(env_tpl.format(instruments=quote(instruments)), f"{label_prefix}:bulk")
+        if not r or "Data" not in r:
+            return {c: None for c in C}
+        d = r["Data"]
+        return {c: _n((d.get(f"{c}-USD-INVERSE-PERPETUAL") or {}).get("VALUE")) for c in C}
+
+    return _inner
+
+
+_AD["binance"] = _bulk(_E10, "binance")
+_AD["bybit"] = _bulk(_E11, "bybit")
+
+
+@_reg("bitget")
+async def _a_bitget() -> AR:
+    async def _f(c: str):
+        return {c: await _tryv([
+            {"label": f"bitget:{s}", "url": _E2.format(symbol=quote(s)),
+             "extract": lambda d: (d.get("data") or [{}])[0].get("fundingRate")}
+            for s in (f"{c}USDT", f"{c}-USDT")
+        ])}
+
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
+
+
+@_reg("kucoin")
+async def _a_kucoin() -> AR:
+    async def _f(c: str):
+        syms = (["XBTUSDTM", ".XBTUSDTMFPI8H"] if c == "BTC" else []) + [f"{c}USDTM", f"{c}USDT"]
+        return {c: await _tryv([
+            {"label": f"kucoin:{s}", "url": _E3.format(symbol=quote(s)),
+             "extract": lambda d: (d.get("data") or {}).get("nextFundingRate")}
+            for s in syms
+        ])}
+
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
+
+
+@_reg("gate_io")
+async def _a_gate() -> AR:
+    async def _f(c: str):
+        return {c: await _tryv([
+            {"label": f"gate:{s}", "url": _E4.format(symbol=quote(s)),
+             "extract": lambda d: d[0].get("r") if isinstance(d, list) and d else None}
+            for s in (f"{c}_USDT", f"{c}USDT")
+        ])}
+
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
+
+
+@_reg("huobi")
+async def _a_huobi() -> AR:
     o: AR = {}
-    instruments = ",".join([f"{coin}-USD-INVERSE-PERPETUAL" for coin in COINS])
-    url = E10.format(instruments=quote(instruments))
-    r = await fetch_url(url, "binance2:bulk")
-    if not r or "Data" not in r:
-        return {c: None for c in COINS}
-    data = r.get("Data", {})
-    for coin in COINS:
-        inst_key = f"{coin}-USD-INVERSE-PERPETUAL"
-        entry = data.get(inst_key)
-        if entry:
-            o[coin] = to_num(entry.get("VALUE"))
-        else:
-            o[coin] = None
-    return o
-
-
-ADAPTERS["binance2"] = bce
-
-
-async def bbt2() -> AR:
-    o: AR = {}
-    instruments = ",".join([f"{coin}-USD-INVERSE-PERPETUAL" for coin in COINS])
-    url = E11.format(instruments=quote(instruments))
-    r = await fetch_url(url, "bybit2:bulk")
-    if not r or "Data" not in r:
-        return {c: None for c in COINS}
-    data = r.get("Data", {})
-    for coin in COINS:
-        inst_key = f"{coin}-USD-INVERSE-PERPETUAL"
-        entry = data.get(inst_key)
-        if entry:
-            o[coin] = to_num(entry.get("VALUE"))
-        else:
-            o[coin] = None
-    return o
-
-
-ADAPTERS["bybit2"] = bbt2
-
-
-# async def ad_binance() -> AR:
-#     o: AR = {}
-#     async def _f(c):
-#         variants = [
-#             {"label": f"binance:{sym}", "url": E0.format(symbol=quote(sym)), "extract": lambda data: data[0].get("fundingRate") if isinstance(data, list) and data else None}
-#             for sym in symbol_combinations(c)
-#         ]
-#         o[c] = await try_variants(variants)
-#     await asyncio.gather(*(_f(c) for c in COINS))
-#     return o
-#
-# ADAPTERS["binance"] = ad_binance
-#
-# async def ad_bybit() -> AR:
-#     o: AR = {}
-#     async def _f(c):
-#         variants = [
-#             {"label": f"bybit:{sym}", "url": E1.format(symbol=quote(sym)), "extract": lambda data: (data.get("result") or {}).get("list", [{}])[0].get("fundingRate")}
-#             for sym in symbol_combinations(c)
-#         ]
-#         o[c] = await try_variants(variants)
-#     await asyncio.gather(*(_f(c) for c in COINS))
-#     return o
-#
-# ADAPTERS["bybit"] = ad_bybit
-
-async def ad_bitget() -> AR:
-    o: AR = {}
-
-    async def _f(c):
-        sym1 = f"{c.upper()}USDT"
-        sym2 = f"{c.upper()}-USDT"
-        variants = [
-            {"label": f"bitget:{sym1}", "url": E2.format(symbol=quote(sym1)),
-             "extract": lambda data: (data.get("data") or [{}])[0].get("fundingRate")},
-            {"label": f"bitget:{sym2}", "url": E2.format(symbol=quote(sym2)),
-             "extract": lambda data: (data.get("data") or [{}])[0].get("fundingRate")},
-        ]
-        o[c] = await try_variants(variants)
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
-
-
-ADAPTERS["bitget"] = ad_bitget
-
-
-async def ad_kucoin() -> AR:
-    o: AR = {}
-
-    async def _f(c):
-        candidates = []
-        if c.upper() == "BTC":
-            candidates.extend(["XBTUSDTM", ".XBTUSDTMFPI8H"])
-        candidates.extend([f"{c.upper()}USDTM", f"{c.upper()}USDT"])
-        variants = [
-            {"label": f"kucoin:{sym}", "url": E3.format(symbol=quote(sym)),
-             "extract": lambda data: (data.get("data") or {}).get("nextFundingRate")}
-            for sym in candidates
-        ]
-        o[c] = await try_variants(variants)
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
-
-
-ADAPTERS["kucoin"] = ad_kucoin
-
-
-async def ad_gate() -> AR:
-    o: AR = {}
-
-    async def _f(c):
-        c1 = f"{c.upper()}_USDT"
-        c2 = f"{c.upper()}USDT"
-        variants = [
-            {"label": f"gate:{c1}", "url": E4.format(symbol=quote(c1)),
-             "extract": lambda data: data[0].get("r") if isinstance(data, list) and data else None},
-            {"label": f"gate:{c2}", "url": E4.format(symbol=quote(c2)),
-             "extract": lambda data: data[0].get("r") if isinstance(data, list) and data else None},
-        ]
-        o[c] = await try_variants(variants)
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
-
-
-ADAPTERS["gate_io"] = ad_gate
-
-
-async def ad_huobi() -> AR:
-    o: AR = {}
-    for coin in COINS:
-        code = f"{coin.upper()}-USDT"
-        url = E5.format(symbol=quote(code))
-        r = await fetch_url(url, f"huobi:{code}")
+    for coin in C:
+        code = f"{coin}-USDT"
+        r = await _fetch(_E5.format(symbol=quote(code)), f"huobi:{code}")
         if r and r.get("status") == "ok" and isinstance(r.get("data"), dict):
-            rate = r["data"].get("funding_rate") or r["data"].get("estimated_rate")
-            o[coin] = to_num(rate)
+            o[coin] = _n(r["data"].get("funding_rate") or r["data"].get("estimated_rate"))
         else:
             o[coin] = None
         await asyncio.sleep(0.08)
     return o
 
 
-ADAPTERS["huobi"] = ad_huobi
+@_reg("coinbase")
+async def _a_coinbase() -> AR:
+    async def _f(c: str):
+        return {c: await _tryv([
+            {"label": f"coinbase:{inst}", "url": _E6.format(symbol=quote(inst)),
+             "extract": lambda d: _sfn(d.get("results") or d.get("data") or [], "funding_rate", 8)}
+            for inst in (f"{c}-PERP", f"{c}-PERPETUAL", f"{c}-USD-PERP")
+        ])}
+
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
 
 
-async def ad_coinbase() -> AR:
-    o: AR = {}
+@_reg("mexc")
+async def _a_mexc() -> AR:
+    async def _f(c: str):
+        return {c: await _tryv([
+            {"label": f"mexc:{s}", "url": _E7.format(symbol=quote(s)),
+             "extract": lambda d: (d.get("data") or {}).get("fundingRate")}
+            for s in (f"{c}_USDT", f"{c}USDT")
+        ])}
 
-    async def _f(c):
-        insts = [f"{c.upper()}-PERP", f"{c.upper()}-PERPETUAL", f"{c.upper()}-USD-PERP"]
-        variants = [
-            {"label": f"coinbase:{inst}", "url": E6.format(symbol=quote(inst)),
-             "extract": lambda data: sfn((data.get("results") or data.get("data") or []), "funding_rate", 8)}
-            for inst in insts
-        ]
-        o[c] = await try_variants(variants)
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
 
 
-ADAPTERS["coinbase"] = ad_coinbase
+@_reg("okex")
+async def _a_okx() -> AR:
+    async def _f(c: str):
+        inst = f"{c}-USD-SWAP"
+        r = await _fetch(_E8.format(symbol=quote(inst)), f"okx_funding:{inst}")
+        return {c: _n(r["data"][0].get("fundingRate")) if r and r.get("code") == "0" and r.get("data") else None}
+
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
 
 
-async def ad_mexc() -> AR:
-    o: AR = {}
+@_reg("bingx")
+async def _a_bingx() -> AR:
+    async def _f(c: str):
+        return {c: await _tryv([
+            {"label": f"bingx:{s}", "url": _E9.format(symbol=quote(s)),
+             "extract": lambda d: (d.get("data") or [{}])[0].get("fundingRate")}
+            for s in (f"{c}-USDT", f"{c}USDT")
+        ])}
 
-    async def _f(c):
-        c1 = f"{c.upper()}_USDT"
-        c2 = f"{c.upper()}USDT"
-        variants = [
-            {"label": f"mexc:{c1}", "url": E7.format(symbol=quote(c1)),
-             "extract": lambda data: (data.get("data") or {}).get("fundingRate")},
-            {"label": f"mexc:{c2}", "url": E7.format(symbol=quote(c2)),
-             "extract": lambda data: (data.get("data") or {}).get("fundingRate")},
-        ]
-        o[c] = await try_variants(variants)
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
+    results = await asyncio.gather(*(_f(c) for c in C))
+    return {k: v for r in results for k, v in r.items()}
 
 
-ADAPTERS["mexc"] = ad_mexc
+_AD_KEYS = list(_AD.keys())
 
 
-async def ad_okx() -> AR:
-    o: AR = {}
-
-    async def _f(c):
-        inst_id = f"{c.upper()}-USD-SWAP"
-        url = E8.format(symbol=quote(inst_id))
-        r = await fetch_url(url, f"okx_funding:{inst_id}")
-        if r and r.get("code") == "0" and isinstance(r.get("data"), list) and r["data"]:
-            o[c] = to_num(r["data"][0].get("fundingRate"))
-        else:
-            o[c] = None
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
-
-
-ADAPTERS["okex"] = ad_okx
-
-
-async def ad_bingx() -> AR:
-    o: AR = {}
-
-    async def _f(c):
-        c1 = f"{c.upper()}-USDT"
-        c2 = f"{c.upper()}USDT"
-        variants = [
-            {"label": f"bingx:{c1}", "url": E9.format(symbol=quote(c1)),
-             "extract": lambda data: (data.get("data") or [{}])[0].get("fundingRate")},
-            {"label": f"bingx:{c2}", "url": E9.format(symbol=quote(c2)),
-             "extract": lambda data: (data.get("data") or [{}])[0].get("fundingRate")},
-        ]
-        o[c] = await try_variants(variants)
-
-    await asyncio.gather(*(_f(c) for c in COINS))
-    return o
-
-
-ADAPTERS["bingx"] = ad_bingx
-
-ADAPTER_KEYS = list(ADAPTERS.keys())
-
-
-async def run_all_adapters(normalize_cache_key: str = "funding:normalized:allcoins_v2"):
-    cached = cache_obj.get(normalize_cache_key)
+async def run_all_adapters(cache_key: str = CACHE_KEY) -> Dict[str, Any]:
+    cached = _cache.get(cache_key)
     if cached:
         return {"ok": True, "source": "cache", "data": cached}
-    global tot_attempts, tot_failures
-    tot_attempts = 0
-    tot_failures = 0
-    per_ex_count.clear()
-    failed_urls.clear()
+    _tel.reset()
 
-    async def _run_adapter(key: str):
+    async def _run(key: str) -> Dict[str, Any]:
         try:
-            res = await ADAPTERS[key]()
-            return {"key": key, "result": res}
+            return {"key": key, "result": await _AD[key]()}
         except Exception:
-            return {"key": key, "result": {c: None for c in COINS}}
+            return {"key": key, "result": {c: None for c in C}}
 
     start = time.time()
-    tasks_map: Dict[asyncio.Task, str] = {}
-    for k in ADAPTER_KEYS:
-        t = asyncio.create_task(_run_adapter(k))
-        tasks_map[t] = k
-    done, pending = await asyncio.wait(tasks_map.keys(), timeout=GJT / 1000.0)
+    tasks = {asyncio.create_task(_run(k)): k for k in _AD_KEYS}
+    done, pending = await asyncio.wait(tasks.keys(), timeout=JOB_TIMEOUT / 1000)
     results: List[Dict[str, Any]] = []
     for t in done:
         try:
             results.append(t.result())
         except Exception:
-            key = tasks_map.get(t, "unknown")
-            results.append({"key": key, "result": {c: None for c in COINS}})
+            results.append({"key": tasks[t], "result": {c: None for c in C}})
     for t in pending:
-        key = tasks_map.get(t, "unknown")
-        try:
-            t.cancel()
-        except Exception:
-            pass
-        results.append({"key": key, "result": {c: None for c in COINS}})
-    duration_ms = (time.time() - start) * 1000.0
-    normalized: Dict[str, Dict[str, Optional[str]]] = {}
-    for item in results:
-        key = item["key"]
-        r = item.get("result") or {}
-        out_obj: Dict[str, Optional[str]] = {}
-        for coin in COINS:
-            v = r.get(coin)
-            out_obj[coin] = dec_to_pct(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else None
-        normalized[key] = out_obj
-    btc_values: List[float] = []
-    for item in results:
-        btc_val = item.get("result", {}).get("BTC")
-        if btc_val is not None:
-            try:
-                if not math.isnan(float(btc_val)):
-                    btc_values.append(float(btc_val))
-            except Exception:
-                continue
-    btc_overall: Optional[str] = None
-    if btc_values:
-        avg = sum(btc_values) / len(btc_values)
-        btc_overall = dec_to_pct(avg)
-    normalized["btc_overall"] = {"BTC": btc_overall}
-    null_counts = {coin: 0 for coin in COINS}
-    for ex in normalized:
-        for coin in COINS:
-            if normalized[ex].get(coin) is None:
-                null_counts[coin] += 1
-    fully_missing = [c for c, cnt in null_counts.items() if cnt == len(ADAPTER_KEYS)]
-    cache_obj[normalize_cache_key] = normalized
+        t.cancel()
+        results.append({"key": tasks.get(t, "unknown"), "result": {c: None for c in C}})
+    duration_ms = (time.time() - start) * 1000
+    normalized: Dict[str, Dict[str, Optional[str]]] = {
+        item["key"]: {
+            coin: _p(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else None
+            for coin, v in ((c, (item.get("result") or {}).get(c)) for c in C)
+        }
+        for item in results
+    }
+    btc_vals = [
+        float(item["result"]["BTC"]) for item in results
+        if item.get("result", {}).get("BTC") is not None and not math.isnan(float(item["result"]["BTC"]))
+    ]
+    normalized["btc_overall"] = {"BTC": _p(sum(btc_vals) / len(btc_vals)) if btc_vals else None}
+    null_counts = {c: sum(1 for ex in normalized if normalized[ex].get(c) is None) for c in C}
+    fully_missing = [c for c, cnt in null_counts.items() if cnt == len(_AD_KEYS)]
+    ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    _cache[cache_key] = normalized
     return {
-        "ok": True,
-        "source": "live",
-        "data": normalized,
-        "fetchedAt": datetime.now().isoformat(),
+        "ok": True, "source": "live", "data": normalized,
+        "fetchedAt": ist_now.strftime("%d-%m-%Y %I:%M:%S %p IST"),
         "diagnostics": {
             "fullyMissing": fully_missing,
             "durationMs": round(duration_ms, 2),
-            "totalAttempts": tot_attempts,
-            "totalFailures": tot_failures,
-            "perExchangeCount": per_ex_count,
+            "totalAttempts": _tel.attempts,
+            "totalFailures": _tel.failures,
+            "perExchangeCount": dict(_tel.per_exchange),
         },
     }
 
 
-async def run_fetch():
+# DDL for the libsql DB. Prefer running once via ensure_schema.py in CI.
+_DDL = [
+    """CREATE TABLE IF NOT EXISTS rate
+    (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        name TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        rate TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (name, symbol)
+    ) STRICT;""",
+    "CREATE INDEX IF NOT EXISTS idx_rate_name   ON rate(name);",
+    "CREATE INDEX IF NOT EXISTS idx_rate_symbol ON rate(symbol);",
+    """CREATE TRIGGER IF NOT EXISTS trg_rate_updated_at
+       AFTER UPDATE ON rate
+    BEGIN
+      UPDATE rate
+      SET updated_at = NEW.updated_at,
+          version = OLD.version + 1
+      WHERE id = OLD.id;
+    END;""",
+]
+
+def _ensure_schema_once(data_url: str, data_token: str) -> None:
+    """Run the DDL once (optional). Use CI/migration instead in production."""
+    conn = libsql.connect(data_url, auth_token=data_token)
+    cur = conn.cursor()
     try:
-        return await run_all_adapters()
+        for ddl in _DDL:
+            cur.execute(ddl)
+        conn.commit()
+        _logger.info("Schema ensured (DDL run).")
+    finally:
+        conn.close()
+
+
+def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any], chunk_size: int = LIBSQL_CHUNK_SIZE) -> int:
+    """
+    Efficient batched upsert into libsql (Turso). Returns number of rows written.
+    - Uses executemany in chunks to minimize round-trips.
+    - Uses SQLite UPSERT (ON CONFLICT) to avoid DELETE per row.
+    - Wraps in single transaction.
+    """
+    from datetime import datetime
+    start = time.time()
+
+    conn = libsql.connect(data_url, auth_token=data_token)
+    cur = conn.cursor()
+
+    normalized = snapshot.get("data") or {}
+    ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Build list of rows (name, symbol, rate, updated_at)
+    rows: List[tuple] = []
+    for exchange, coin_map in normalized.items():
+        if not isinstance(coin_map, dict):
+            continue
+        for symbol, pct_val in coin_map.items():
+            rows.append((exchange, symbol, pct_val, ist_now))
+
+    total_rows = len(rows)
+    if total_rows == 0:
+        conn.close()
+        return 0
+
+    upsert_sql = """
+    INSERT INTO rate (name, symbol, rate, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(name, symbol) DO UPDATE SET
+      rate = excluded.rate,
+      updated_at = excluded.updated_at,
+      version = COALESCE(version,1) + 1;
+    """
+
+    cur.execute("BEGIN")
+    try:
+        written = 0
+        # chunking executemany to avoid super large parameter lists
+        for i in range(0, total_rows, chunk_size):
+            chunk = rows[i:i+chunk_size]
+            cur.executemany(upsert_sql, chunk)
+            written += len(chunk)
+        conn.commit()
+        elapsed = time.time() - start
+        _logger.info("write_snapshot: wrote %d rows in %.2fs (chunks=%d)", written, elapsed, (total_rows + chunk_size - 1) // chunk_size)
+        return written
     except Exception:
-        raise HTTPException(status_code=500, detail={"ok": False, "error": "internal_error"})
-
-
-def health_check():
-    return {"ok": True, "ts": int(time.time() * 1000)}
-
-
-def write_replace_collection(collection, data):
-    collection.delete_many({})
-    result = collection.insert_one(data)
-    return result.inserted_id
-
-
-def create_mongo_client(uri: str, allow_invalid_cert: bool = False, timeout_ms: int = 10000) -> MongoClient:
-    kwargs = {
-        "serverSelectionTimeoutMS": timeout_ms,
-        "tls": True,
-        "tlsCAFile": certifi.where(),
-        "server_api": ServerApi("1"),
-    }
-    if allow_invalid_cert:
-        kwargs["tlsAllowInvalidCertificates"] = True
-    return MongoClient(uri, **kwargs)
-
-
-def connect_mongo_with_fallbacks(uri: str) -> MongoClient:
-    try:
-        client = create_mongo_client(uri, allow_invalid_cert=False, timeout_ms=10000)
-        client.admin.command("ping")
-        return client
-    except Exception as e_secure:
-        msg = str(e_secure)
-        if "SSL" in msg or "tls" in msg.lower() or "handshake" in msg.lower():
-            try:
-                client = create_mongo_client(uri, allow_invalid_cert=True, timeout_ms=20000)
-                client.admin.command("ping")
-                return client
-            except Exception as e_insecure:
-                raise e_secure from e_insecure
+        conn.rollback()
         raise
+    finally:
+        conn.close()
 
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logg = logging.getLogger("funding-normalizer")
 
 if __name__ == "__main__":
+    # Optionally ensure schema on start (disabled by default). For production prefer running ensure_schema.py once.
+    if ENSURE_SCHEMA_ON_START:
+        if not DT_URL or not DT_KEY:
+            raise RuntimeError("Missing DB URL/KEY to run DDL (set DBT_URL/DBT_KEY or DT_URL/DT_KEY).")
+        _ensure_schema_once(DT_URL, DT_KEY)
+
     client = None
     try:
-        out = asyncio.run(run_all_adapters())
-        URI = os.getenv("URI")
-        NAME = os.getenv("NAME")
-        if not URI or not NAME:
-            raise RuntimeError("Missing required environment variables for MongoDB: URI and NAME must be set.")
-        try:
-            client = connect_mongo_with_fallbacks(URI)
-        except Exception as conn_exc:
-            # logg.error("Failed to connect to MongoDB: %s", conn_exc)
-            raise
-        try:
-            db = client[NAME]
-            collection = db["fr"]
-            inserted_id = write_replace_collection(collection, out)
-            # logg.info("Mongo write successful, inserted id: %s", inserted_id)
-        except PyMongoError as pm_err:
-            # logg.exception("PyMongo error during rfcoll: %s", pm_err)
-            raise
-        except Exception as e:
-            # logg.exception("Unexpected error during Mongo write: %s", e)
-            raise
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
-        print(json_util.dumps(out))
+        t0 = time.time()
+        snapshot = asyncio.run(run_all_adapters())
+        _logger.info("fetch took %.2fs", time.time() - t0)
+
+        if not snapshot:
+            raise RuntimeError("No output from run_all_adapters()")
+
+        if not DT_URL or not DT_KEY:
+            raise RuntimeError("Missing required environment variables for libsql/Turso: DBT_URL/DBT_KEY (or DT_URL/DT_KEY) must be set.")
+
+        count = write_snapshot(DT_URL, DT_KEY, snapshot)
+        _logger.info("Successfully Executed: %d rows written", count)
+    except Exception as exc:
+        _logger.exception("Fatal error: %s", exc)
+        raise
     finally:
         try:
-            asyncio.run(close_session())
+            asyncio.run(_cs())
         except Exception:
             pass
