@@ -7,20 +7,18 @@ jobs:
   run-script:
     name: Run Funding Normalizer
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5   # overall job timeout safe
 
     env:
       PYTHONUNBUFFERED: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
-      # Tuned timeouts — safe for GitHub Actions runners
       HTTP_TIMEOUT_MS: "7000"
       ADAPTER_TIMEOUT_MS: "25000"
       GLOBAL_JOB_TIMEOUT_MS: "75000"
       CACHE_TTL_SECONDS: "20"
       DEBUG_API: "false"
 
-      # Secrets — set these in repo Settings → Secrets and variables → Actions
       Z9_A1: ${{ secrets.Z9_A1 }}
       Z9_B2: ${{ secrets.Z9_B2 }}
       Z9_C3: ${{ secrets.Z9_C3 }}
@@ -52,4 +50,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run script
-        run: timeout 90 python cfr.py
+        run: python cfr.py   # timeout removed to allow script to complete naturally
