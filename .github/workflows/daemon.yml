@@ -1,69 +1,53 @@
 name: Daemon
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   run-script:
+    name: Run Funding Normalizer
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    concurrency:
-      group: daemon-job
-      cancel-in-progress: true
+    timeout-minutes: 3
 
     env:
       PYTHONUNBUFFERED: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
+      # Tuned timeouts — safe for GitHub Actions runners
+      HTTP_TIMEOUT_MS: "7000"
+      ADAPTER_TIMEOUT_MS: "25000"
+      GLOBAL_JOB_TIMEOUT_MS: "75000"
+      CACHE_TTL_SECONDS: "20"
+      DEBUG_API: "false"
+
+      # Secrets — set these in repo Settings → Secrets and variables → Actions
+      Z9_A1: ${{ secrets.Z9_A1 }}
+      Z9_B2: ${{ secrets.Z9_B2 }}
+      Z9_C3: ${{ secrets.Z9_C3 }}
+      Z9_D4: ${{ secrets.Z9_D4 }}
+      Z9_E5: ${{ secrets.Z9_E5 }}
+      Z9_F6: ${{ secrets.Z9_F6 }}
+      Z9_G7: ${{ secrets.Z9_G7 }}
+      Z9_H8: ${{ secrets.Z9_H8 }}
+      Z9_I9: ${{ secrets.Z9_I9 }}
+      Z9_J0: ${{ secrets.Z9_J0 }}
+      Z9_K1: ${{ secrets.Z9_K1 }}
+      Z9_K2: ${{ secrets.Z9_K2 }}
+      DBT_URL: ${{ secrets.DBT_URL }}
+      DBT_KEY: ${{ secrets.DBT_KEY }}
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python (with pip cache)
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install \
-            aiohttp \
-            cachetools \
-            libsql \
-            python-dotenv \
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Run Script
-        timeout-minutes: 2
-        env:
-          Z9_A1: ${{ secrets.Z9_A1 }}
-          Z9_B2: ${{ secrets.Z9_B2 }}
-          Z9_C3: ${{ secrets.Z9_C3 }}
-          Z9_D4: ${{ secrets.Z9_D4 }}
-          Z9_E5: ${{ secrets.Z9_E5 }}
-          Z9_F6: ${{ secrets.Z9_F6 }}
-          Z9_G7: ${{ secrets.Z9_G7 }}
-          Z9_H8: ${{ secrets.Z9_H8 }}
-          Z9_I9: ${{ secrets.Z9_I9 }}
-          Z9_J0: ${{ secrets.Z9_J0 }}
-          Z9_K1: ${{ secrets.Z9_K1 }}
-          Z9_K2: ${{ secrets.Z9_K2 }}
-          DBT_URL: ${{ secrets.DBT_URL }}
-          DBT_KEY: ${{ secrets.DBT_KEY }}
-          CACHE_TTL_SECONDS: 20
-          HTTP_TIMEOUT_MS: 8000
-          GLOBAL_JOB_TIMEOUT_MS: 45000
-          DEBUG_API: "false"
-
-        run: |
-          # timeout command as extra safety net — kills process after 90s regardless
-          timeout 90 python cfr.py
-          EXIT_CODE=$?
-          # exit code 124 means timeout command killed it — treat as failure
-          if [ $EXIT_CODE -eq 124 ]; then
-            echo "::error::Script timed out after 90s (killed by timeout command)"
-            exit 1
-          fi
-          exit $EXIT_CODE
+      - name: Run script
+        run: timeout 90 python cfr.py
