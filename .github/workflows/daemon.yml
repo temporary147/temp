@@ -33,8 +33,8 @@ jobs:
       Z9_J0: ${{ secrets.Z9_J0 }}
       Z9_K1: ${{ secrets.Z9_K1 }}
       Z9_K2: ${{ secrets.Z9_K2 }}
-      DBT_URL: ${{ secrets.DBT_URL }}
-      DBT_KEY: ${{ secrets.DBT_KEY }}
+      URI: ${{ secrets.URI }}
+      NAME: ${{ secrets.NAME }}
 
     steps:
       - name: Checkout repository
