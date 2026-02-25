@@ -27,7 +27,7 @@ _E0, _E1, _E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
     "Z9_A1", "Z9_B2", "Z9_C3", "Z9_D4", "Z9_E5", "Z9_F6", "Z9_G7", "Z9_H8", "Z9_I9", "Z9_J0", "Z9_K1", "Z9_K2"
 ))
 
-# Turso / libsql connection info
+# Turso / libsql connection info (CI/Secrets must provide these)
 DT_URL = os.getenv("DBT_URL") or os.getenv("DT_URL") or os.getenv("LIBSQL_URL") or os.getenv("DBT_URL")
 DT_KEY = os.getenv("DBT_KEY") or os.getenv("DT_KEY") or os.getenv("LIBSQL_KEY") or os.getenv("DBT_KEY")
 
@@ -37,9 +37,9 @@ DEBUG_API = _g("DEBUG_API", required=False, default="true").lower() in ("true", 
 JOB_TIMEOUT = int(_g("GLOBAL_JOB_TIMEOUT_MS", required=False, default="200000"))
 CACHE_KEY = "funding:normalized:allcoins_v2"
 
-# chunk size for single-statement multi-row insert
+# chunk size for single-statement multi-row insert (tune)
 LIBSQL_CHUNK_SIZE = int(os.getenv("LIBSQL_CHUNK_SIZE", "600"))
-# optionally run DDL on start (disable in production if you run ensure_schema.py in CI)
+# optionally run DDL on start (but recommended: run ensure_schema.py in CI)
 ENSURE_SCHEMA_ON_START = os.getenv("ENSURE_SCHEMA_ON_START", "false").lower() in ("true", "1")
 
 C: List[str] = [
@@ -389,7 +389,7 @@ async def run_all_adapters(cache_key: str = CACHE_KEY) -> Dict[str, Any]:
     }
 
 
-# DDL for the libsql DB. Prefer running once via ensure_schema.py in CI.
+# DDL (kept in script for optional ENSURE_SCHEMA_ON_START)
 _DDL = [
     """CREATE TABLE IF NOT EXISTS rate
     (
@@ -411,7 +411,6 @@ _DDL = [
           version = OLD.version + 1
       WHERE id = OLD.id;
     END;""",
-    # snapshots table for fast whole-snapshot writes (single-row)
     """CREATE TABLE IF NOT EXISTS snapshots (
          id TEXT PRIMARY KEY,
          ts TEXT NOT NULL,
@@ -433,39 +432,35 @@ def _ensure_schema_once(data_url: str, data_token: str) -> None:
 
 
 def _write_json_snapshot(conn, snapshot: Dict[str, Any], ist_now: str) -> None:
-    # single fast write: store full snapshot as JSON (helps ensure data persisted quickly)
     cur = conn.cursor()
     payload = json.dumps(snapshot, separators=(",", ":"))
     cur.execute("INSERT OR REPLACE INTO snapshots (id, ts, payload) VALUES (?, ?, ?);", ("latest", ist_now, payload))
 
 
-def _chunked_multi_insert_sql(rows: List[tuple]) -> List[tuple]:
-    """
-    Convert rows into a list of (sql, params) where each sql is a single INSERT statement with many value groups.
-    Each row tuple is (name, symbol, rate, updated_at)
-    """
-    if not rows:
-        return []
-    statements: List[tuple] = []
-    # we'll create chunks outside this function in the caller to keep memory predictable
-    return statements
-
-
 def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any], chunk_size: int = LIBSQL_CHUNK_SIZE) -> int:
-    """
-    Fast write into libsql (Turso):
-    1) Write full JSON snapshot into single-row snapshots table (quick).
-    2) Upsert rate rows in chunks using a single multi-row INSERT statement per chunk to minimize network round trips.
-    """
     start_total = time.time()
     ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
     conn = libsql.connect(data_url, auth_token=data_token)
     try:
-        # 1) Fast full snapshot write (1 network op)
-        _write_json_snapshot(conn, snapshot, ist_now)
-        conn.commit()
-        snap_write_time = time.time() - start_total
-        _logger.info("Snapshot JSON written in %.3fs", snap_write_time)
+        # 1) Try quick JSON snapshot write; if snapshots table is missing, create schema and retry
+        try:
+            _write_json_snapshot(conn, snapshot, ist_now)
+            conn.commit()
+            _logger.info("Snapshot JSON written quickly.")
+        except Exception as e:
+            # If table missing, attempt to create schema (defensive fallback)
+            msg = str(e)
+            if "no such table" in msg.lower() or "sqlite error" in msg.lower():
+                _logger.warning("snapshots table missing, attempting to create schema (fallback).")
+                for ddl in _DDL:
+                    conn.cursor().execute(ddl)
+                conn.commit()
+                # retry snapshot write
+                _write_json_snapshot(conn, snapshot, ist_now)
+                conn.commit()
+                _logger.info("Snapshot written after creating schema (fallback).")
+            else:
+                raise
 
         # 2) Build rows for rate table
         normalized = snapshot.get("data") or {}
@@ -481,22 +476,17 @@ def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any], chu
             _logger.info("No rows to upsert into rate table.")
             return 0
 
-        # We'll use a single INSERT ... VALUES (...),(...),... ON CONFLICT(...) DO UPDATE ... per chunk
-        # Prepare static parts
         base_insert = "INSERT INTO rate (name, symbol, rate, updated_at) VALUES "
         conflict_sql = " ON CONFLICT(name, symbol) DO UPDATE SET rate = excluded.rate, updated_at = excluded.updated_at, version = COALESCE(version,1) + 1;"
         written = 0
         up_start = time.time()
 
-        # chunk & send single-statement per chunk (minimize RPCs)
         for i in range(0, total_rows, chunk_size):
             chunk = rows[i:i + chunk_size]
-            # placeholders & param flattening
             placeholders = ",".join(["(?, ?, ?, ?)"] * len(chunk))
             sql = base_insert + placeholders + conflict_sql
             params = []
             for r in chunk:
-                # r is (name, symbol, rate, updated_at) — JSON nulls become Python None -> stored as NULL
                 params.extend(r)
             cur = conn.cursor()
             cur.execute("BEGIN")
@@ -517,7 +507,6 @@ def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any], chu
 
 
 if __name__ == "__main__":
-    # optionally ensure schema on start (recommended to run ensure_schema.py once in CI instead)
     if ENSURE_SCHEMA_ON_START:
         if not DT_URL or not DT_KEY:
             raise RuntimeError("Missing DB URL/KEY to run DDL (set DBT_URL/DBT_KEY or DT_URL/DT_KEY).")
@@ -534,7 +523,6 @@ if __name__ == "__main__":
         if not DT_URL or not DT_KEY:
             raise RuntimeError("Missing required environment variables for libsql/Turso: DBT_URL/DBT_KEY (or DT_URL/DT_KEY) must be set.")
 
-        # write snapshot + upsert rows (fast)
         w0 = time.time()
         count = write_snapshot(DT_URL, DT_KEY, snapshot)
         _logger.info("write_snapshot total took %.3fs; rows written=%d", time.time() - w0, count)
@@ -546,8 +534,6 @@ if __name__ == "__main__":
             asyncio.run(_cs())
         except Exception:
             pass
-
-
 
 
 
