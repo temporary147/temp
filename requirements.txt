@@ -1,4 +1,7 @@
 aiohttp
-libsql
 cachetools
+bson
+certifi
 python-dotenv
+fastapi
+pymongo
