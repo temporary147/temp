@@ -22,8 +22,8 @@ def _g(k: str, required: bool = True, default: str | None = None) -> str:
     return v
 
 
-_E0, _E1, _E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
-    "Z9_A1", "Z9_B2", "Z9_C3", "Z9_D4", "Z9_E5", "Z9_F6", "Z9_G7", "Z9_H8", "Z9_I9", "Z9_J0", "Z9_K1", "Z9_K2"
+_E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
+    "Z9_B2", "Z9_C3", "Z9_D4", "Z9_E5", "Z9_F6", "Z9_G7", "Z9_H8", "Z9_J0", "Z9_K1", "Z9_K2"
 ))
 DT_URL = os.getenv("DBT_URL")
 DT_KEY = os.getenv("DBT_KEY")
@@ -34,7 +34,7 @@ CACHE_TTL = int(_g("CACHE_TTL_SECONDS", required=False, default="20"))
 HTTP_TIMEOUT = int(_g("HTTP_TIMEOUT_MS", required=False, default="15000"))
 JOB_TIMEOUT = int(_g("GLOBAL_JOB_TIMEOUT_MS", required=False, default="200000"))
 CACHE_KEY = "funding:normalized:allcoins_v2"
-LIBSQL_CHUNK_SIZE = int(os.getenv("LIBSQL_CHUNK_SIZE", "800"))
+CHUNK_SIZE = 800
 
 C: List[str] = ["BTC", "ETH", "XRP", "BNB", "SOL", "TRX", "DOGE", "BCH", "ADA", "HYPE", "XMR", "LINK", "XLM", "HBAR",
                 "ZEC", "LTC", "AVAX", "SUI", "TON", "UNI", "DOT", "PAXG", "XAUT", "ARB", "APT"]
@@ -435,7 +435,7 @@ def ensure_schema_once(data_url: str, data_token: str) -> None:
         cur = conn.cursor()
         for ddl in _DDL: cur.execute(ddl)
         conn.commit()
-        _logger.info("Schema ensured (DDL run).")
+        _logger.info("Schema ensured (DDL Run).")
     finally:
         conn.close()
 
@@ -447,7 +447,7 @@ def _write_json_snapshot(conn, snapshot: Dict[str, Any], ist_now: str) -> None:
 
 
 def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any],
-                   chunk_size: int = LIBSQL_CHUNK_SIZE) -> int:
+                   chunk_size: int = CHUNK_SIZE) -> int:
     start_total = time.time()
     ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
     conn = libsql.connect(data_url, auth_token=data_token)
