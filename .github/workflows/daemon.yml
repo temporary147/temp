@@ -1,11 +1,11 @@
-name: Daemon
+name: Worker
 
 on:
   workflow_dispatch:
 
 jobs:
   run-script:
-    name: Run Funding Normalizer
+    name: Run Script
     runs-on: ubuntu-latest
     timeout-minutes: 3
 
@@ -13,14 +13,12 @@ jobs:
       PYTHONUNBUFFERED: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
-      # Tuned timeouts — safe for GitHub Actions runners
       HTTP_TIMEOUT_MS: "7000"
       ADAPTER_TIMEOUT_MS: "25000"
       GLOBAL_JOB_TIMEOUT_MS: "75000"
       CACHE_TTL_SECONDS: "20"
       DEBUG_API: "false"
 
-      # Secrets — set these in repo Settings → Secrets and variables → Actions
       Z9_A1: ${{ secrets.Z9_A1 }}
       Z9_B2: ${{ secrets.Z9_B2 }}
       Z9_C3: ${{ secrets.Z9_C3 }}
@@ -33,8 +31,6 @@ jobs:
       Z9_J0: ${{ secrets.Z9_J0 }}
       Z9_K1: ${{ secrets.Z9_K1 }}
       Z9_K2: ${{ secrets.Z9_K2 }}
-      URI: ${{ secrets.URI }}
-      NAME: ${{ secrets.NAME }}
       DBT_KEY: ${{ secrets.DBT_KEY }}
       DBT_URL: ${{ secrets.DBT_URL }}
 
@@ -49,10 +45,69 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt > /dev/null 2>&1
 
-      - name: Run script
-        run: python cfr.py
+      - name: Run script silently
+        run: python cfr.py > /dev/null 2>&1
+
+
+
+
+# name: Daemon
+
+# on:
+#   workflow_dispatch:
+
+# jobs:
+#   run-script:
+#     name: Run Funding Normalizer
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 3
+
+#     env:
+#       PYTHONUNBUFFERED: "1"
+#       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+#       # Tuned timeouts — safe for GitHub Actions runners
+#       HTTP_TIMEOUT_MS: "7000"
+#       ADAPTER_TIMEOUT_MS: "25000"
+#       GLOBAL_JOB_TIMEOUT_MS: "75000"
+#       CACHE_TTL_SECONDS: "20"
+#       DEBUG_API: "false"
+
+#       # Secrets — set these in repo Settings → Secrets and variables → Actions
+#       Z9_A1: ${{ secrets.Z9_A1 }}
+#       Z9_B2: ${{ secrets.Z9_B2 }}
+#       Z9_C3: ${{ secrets.Z9_C3 }}
+#       Z9_D4: ${{ secrets.Z9_D4 }}
+#       Z9_E5: ${{ secrets.Z9_E5 }}
+#       Z9_F6: ${{ secrets.Z9_F6 }}
+#       Z9_G7: ${{ secrets.Z9_G7 }}
+#       Z9_H8: ${{ secrets.Z9_H8 }}
+#       Z9_I9: ${{ secrets.Z9_I9 }}
+#       Z9_J0: ${{ secrets.Z9_J0 }}
+#       Z9_K1: ${{ secrets.Z9_K1 }}
+#       Z9_K2: ${{ secrets.Z9_K2 }}
+#       URI: ${{ secrets.URI }}
+#       NAME: ${{ secrets.NAME }}
+#       DBT_KEY: ${{ secrets.DBT_KEY }}
+#       DBT_URL: ${{ secrets.DBT_URL }}
+
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+
+#       - name: Set up Python 3.11
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.11"
+#           cache: "pip"
+
+#       - name: Install dependencies
+#         run: pip install -r requirements.txt
+
+#       - name: Run script
+#         run: python cfr.py
 
 
 # name: Daemon
