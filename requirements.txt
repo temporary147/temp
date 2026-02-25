@@ -4,3 +4,4 @@ certifi
 python-dotenv
 fastapi
 pymongo
+libsql
