@@ -411,21 +411,7 @@ _DDL = [
         version    = OLD.version + 1
     WHERE id = OLD.id;
     END;""",
-    """CREATE TABLE IF NOT EXISTS snapshots
-       (
-           id
-           TEXT
-           PRIMARY
-           KEY,
-           ts
-           TEXT
-           NOT
-           NULL,
-           payload
-           TEXT
-           NOT
-           NULL
-       ) STRICT;""",
+    # NOTE: snapshots table and its DDL intentionally REMOVED per request.
 ]
 
 
@@ -440,11 +426,7 @@ def ensure_schema_once(data_url: str, data_token: str) -> None:
         conn.close()
 
 
-def _write_json_snapshot(conn, snapshot: Dict[str, Any], ist_now: str) -> None:
-    cur = conn.cursor()
-    payload = json.dumps(snapshot, separators=(",", ":"))
-    cur.execute("INSERT OR REPLACE INTO snapshots (id, ts, payload) VALUES (?, ?, ?);", ("latest", ist_now, payload))
-
+# _write_json_snapshot removed - we no longer write snapshot JSON into a DB table.
 
 def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any],
                    chunk_size: int = CHUNK_SIZE) -> int:
@@ -452,21 +434,8 @@ def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any],
     ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
     conn = libsql.connect(data_url, auth_token=data_token)
     try:
-        try:
-            _write_json_snapshot(conn, snapshot, ist_now)
-            conn.commit()
-            _logger.info("Snapshot JSON Written Quickly.")
-        except Exception as e:
-            msg = str(e).lower()
-            if "no such table" in msg or "sqlite error" in msg:
-                _logger.warning("snapshots table missing; creating schema and retrying.")
-                for ddl in _DDL: conn.cursor().execute(ddl)
-                conn.commit()
-                _write_json_snapshot(conn, snapshot, ist_now)
-                conn.commit()
-                _logger.info("Snapshot written after creating schema (fallback).")
-            else:
-                raise
+        # Snapshot JSON writing to 'snapshots' table has been disabled intentionally.
+        # (Per request: avoid duplicating the data into a snapshots table.)
         normalized = snapshot.get("data") or {}
         rows: List[tuple] = []
         for exchange, coin_map in normalized.items():
