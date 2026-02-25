@@ -372,46 +372,20 @@ async def run_all_adapters(cache_key: str = CACHE_KEY) -> Dict[str, Any]:
 
 _DDL = [
     """CREATE TABLE IF NOT EXISTS rate
-    (
-        id
-        TEXT
-        PRIMARY
-        KEY
-        DEFAULT (
-        lower (
-        hex(
-        randomblob
        (
-        16
-       )))),
-        name TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        rate TEXT,
-        version INTEGER NOT NULL DEFAULT 1,
-        updated_at TEXT NOT NULL DEFAULT
-       (
-           datetime
-       (
-           'now'
-       )),
-        UNIQUE
-       (
-           name,
-           symbol
-       )
-        ) STRICT;""",
-    "CREATE INDEX IF NOT EXISTS idx_rate_name   ON rate(name);",
-    "CREATE INDEX IF NOT EXISTS idx_rate_symbol ON rate(symbol);",
-    """CREATE TRIGGER IF NOT EXISTS trg_rate_updated_at
-       AFTER
-    UPDATE ON rate
-    BEGIN
-    UPDATE rate
-    SET updated_at = NEW.updated_at,
-        version    = OLD.version + 1
-    WHERE id = OLD.id;
-    END;""",
-    # NOTE: snapshots table and its DDL intentionally REMOVED per request.
+           id
+           TEXT
+           PRIMARY
+           KEY,
+           ts
+           TEXT
+           NOT
+           NULL,
+           payload
+           TEXT
+           NOT
+           NULL
+       ) STRICT;""",
 ]
 
 
@@ -426,7 +400,11 @@ def ensure_schema_once(data_url: str, data_token: str) -> None:
         conn.close()
 
 
-# _write_json_snapshot removed - we no longer write snapshot JSON into a DB table.
+def _write_json_snapshot(conn, snapshot: Dict[str, Any], ist_now: str) -> None:
+    cur = conn.cursor()
+    payload = json.dumps(snapshot, separators=(",", ":"))
+    cur.execute("INSERT OR REPLACE INTO rate (id, ts, payload) VALUES (?, ?, ?);", ("latest", ist_now, payload))
+
 
 def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any],
                    chunk_size: int = CHUNK_SIZE) -> int:
@@ -434,41 +412,25 @@ def write_snapshot(data_url: str, data_token: str, snapshot: Dict[str, Any],
     ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
     conn = libsql.connect(data_url, auth_token=data_token)
     try:
-        # Snapshot JSON writing to 'snapshots' table has been disabled intentionally.
-        # (Per request: avoid duplicating the data into a snapshots table.)
-        normalized = snapshot.get("data") or {}
-        rows: List[tuple] = []
-        for exchange, coin_map in normalized.items():
-            if not isinstance(coin_map, dict): continue
-            for symbol, pct_val in coin_map.items():
-                rows.append((exchange, symbol, pct_val, ist_now))
-        total_rows = len(rows)
-        if total_rows == 0:
-            _logger.info("No data into rate json.")
-            return 0
-        base_insert = "INSERT INTO rate (name, symbol, rate, updated_at) VALUES "
-        conflict_sql = " ON CONFLICT(name, symbol) DO UPDATE SET rate = excluded.rate, updated_at = excluded.updated_at, version = COALESCE(version,1) + 1;"
-        written = 0
-        up_start = time.time()
-        for i in range(0, total_rows, chunk_size):
-            chunk = rows[i:i + chunk_size]
-            placeholders = ",".join(["(?, ?, ?, ?)"] * len(chunk))
-            sql = base_insert + placeholders + conflict_sql
-            params: List[Any] = []
-            for r in chunk: params.extend(r)
-            cur = conn.cursor()
-            cur.execute("BEGIN")
-            try:
-                cur.execute(sql, params)
+        try:
+            _write_json_snapshot(conn, snapshot, ist_now)
+            conn.commit()
+            _logger.info("Snapshot JSON Written Quickly into rate json.")
+        except Exception as e:
+            msg = str(e).lower()
+            if "no such table" in msg or "sqlite error" in msg:
+                _logger.warning("rate json missing; creating schema and retrying.")
+                for ddl in _DDL: conn.cursor().execute(ddl)
                 conn.commit()
-                written += len(chunk)
-            except Exception:
-                conn.rollback()
+                _write_json_snapshot(conn, snapshot, ist_now)
+                conn.commit()
+                _logger.info("Snapshot written after creating schema (fallback).")
+            else:
                 raise
-        up_elapsed = time.time() - up_start
         total_elapsed = time.time() - start_total
-        _logger.info("json %d count in %.3fs (total elapsed %.3fs)", written, up_elapsed, total_elapsed)
-        return written
+        _logger.info("rate json write total elapsed %.3fs", total_elapsed)
+        # We wrote the snapshot JSON into rate table.
+        return 1
     finally:
         conn.close()
 
