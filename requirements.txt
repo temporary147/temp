@@ -1,6 +1,5 @@
 aiohttp
 cachetools
-bson
 certifi
 python-dotenv
 fastapi
