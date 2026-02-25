@@ -22,8 +22,8 @@ def _g(k: str, required: bool = True, default: str | None = None) -> str:
     return v
 
 
-_E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
-    "Z9_B2", "Z9_C3", "Z9_D4", "Z9_E5", "Z9_F6", "Z9_G7", "Z9_H8", "Z9_J0", "Z9_K1", "Z9_K2"
+_E0, _E1, _E2, _E3, _E4, _E5, _E6, _E7, _E8, _E9, _E10, _E11 = (_g(x) for x in (
+    "Z9_A1", "Z9_B2", "Z9_C3", "Z9_D4", "Z9_E5", "Z9_F6", "Z9_G7", "Z9_H8", "Z9_I9", "Z9_J0", "Z9_K1", "Z9_K2"
 ))
 DT_URL = os.getenv("DBT_URL")
 DT_KEY = os.getenv("DBT_KEY")
