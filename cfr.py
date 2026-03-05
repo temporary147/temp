@@ -9,7 +9,6 @@ import aiohttp, libsql
 from cachetools import TTLCache
 from dotenv import load_dotenv
 
-# --- env / logging init ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 _logger = logging.getLogger("Worker Started!")
@@ -286,13 +285,13 @@ async def _a_coinbase() -> AR:
     return {k: v for r in results for k, v in r.items()}
 
 
-@_reg("mexc")
-async def _a_mexc() -> AR:
+@_reg("bitmart")
+async def _a_bitmart() -> AR:
     async def _f(c: str):
         return {c: await _tryv([
-            {"label": f"mexc:{s}", "url": _E7.format(symbol=quote(s)),
-             "extract": lambda d: (d.get("data") or {}).get("fundingRate")}
-            for s in (f"{c}_USDT", f"{c}USDT")
+            {"label": f"bitmart:{s}", "url": _E7.format(symbol=quote(s)),
+             "extract": lambda d: (d.get("data") or {}).get("rate_value")}
+            for s in (f"{c}USDT", f"{c}USDT")
         ])}
 
     results = await asyncio.gather(*(_f(c) for c in C))
